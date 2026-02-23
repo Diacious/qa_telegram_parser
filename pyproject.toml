@@ -1,0 +1,21 @@
+[project]
+name = "telegram-parsing"
+version = "0.1.0"
+description = "Telegram channel message parser and classifier"
+requires-python = ">=3.11"
+dependencies = [
+    "telethon>=1.36",
+    "openai>=1.0",
+    "python-dotenv>=1.0",
+    "rich>=13.0",
+]
+
+[project.optional-dependencies]
+ollama = ["ollama>=0.4"]
+
+[project.scripts]
+telegram-parse = "telegram_parsing.main:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
