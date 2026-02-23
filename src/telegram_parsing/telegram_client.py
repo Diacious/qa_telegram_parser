@@ -28,6 +28,31 @@ class RawMessage:
     poll_options: list[str] = field(default_factory=list)
     correct_option_index: int | None = None  # index into poll_options
 
+    def to_dict(self) -> dict:
+        return {
+            "message_id": self.message_id,
+            "date": self.date,
+            "sender": self.sender,
+            "text": self.text,
+            "is_quiz": self.is_quiz,
+            "poll_question": self.poll_question,
+            "poll_options": self.poll_options,
+            "correct_option_index": self.correct_option_index,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict) -> RawMessage:
+        return cls(
+            message_id=data["message_id"],
+            date=data["date"],
+            sender=data.get("sender"),
+            text=data["text"],
+            is_quiz=data.get("is_quiz", False),
+            poll_question=data.get("poll_question"),
+            poll_options=data.get("poll_options", []),
+            correct_option_index=data.get("correct_option_index"),
+        )
+
 
 def _extract_poll_text(obj: object) -> str:
     """Extract plain text from a Poll question/answer.

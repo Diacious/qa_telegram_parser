@@ -4,6 +4,7 @@ import argparse
 import asyncio
 import json
 import logging
+import os
 import sys
 
 from rich.console import Console
@@ -88,33 +89,59 @@ async def run(args: argparse.Namespace) -> None:
 
     classifier = create_classifier(config.llm)
 
-    # ── Phase 1: Fetch messages ──────────────────────────────────────────
-    console.print(f"\n[bold]Fetching messages from [cyan]{args.channel}[/cyan]...[/bold]")
-    console.print(
-        "[dim]First run will ask you to log in to Telegram (phone + code).[/dim]\n"
-    )
+    # Name for the intermediate recovery file
+    pending_file = f".pending_messages_{args.channel}.json"
 
-    quiz_messages: list[RawMessage] = []
-    text_messages: list[RawMessage] = []
+    # ── Check for pending messages from a previous failed run ────────────
+    if os.path.exists(pending_file):
+        console.print(
+            f"\n[yellow]Found pending messages from a previous run: "
+            f"[bold]{pending_file}[/bold][/yellow]"
+        )
+        console.print("[yellow]Resuming classification from saved messages…[/yellow]\n")
 
-    async for msg in iter_channel_messages(
-        config.telegram, args.channel, max_messages=config.max_messages
-    ):
-        if msg.is_quiz:
-            quiz_messages.append(msg)
-        else:
-            text_messages.append(msg)
+        with open(pending_file, "r", encoding="utf-8") as f:
+            raw_data = json.load(f)
 
-    total = len(quiz_messages) + len(text_messages)
-    if total == 0:
-        console.print("[yellow]No messages found in channel.[/yellow]")
-        return
+        all_messages = [RawMessage.from_dict(d) for d in raw_data]
+        quiz_messages = [m for m in all_messages if m.is_quiz]
+        text_messages = [m for m in all_messages if not m.is_quiz]
 
-    console.print(
-        f"Fetched [green]{total}[/green] messages "
-        f"([cyan]{len(quiz_messages)}[/cyan] quizzes, "
-        f"[cyan]{len(text_messages)}[/cyan] text).\n"
-    )
+        console.print(
+            f"Loaded [green]{len(all_messages)}[/green] messages "
+            f"([cyan]{len(quiz_messages)}[/cyan] quizzes, "
+            f"[cyan]{len(text_messages)}[/cyan] text).\n"
+        )
+    else:
+        # ── Phase 1: Fetch messages from Telegram ────────────────────
+        console.print(
+            f"\n[bold]Fetching messages from [cyan]{args.channel}[/cyan]...[/bold]"
+        )
+        console.print(
+            "[dim]First run will ask you to log in to Telegram (phone + code).[/dim]\n"
+        )
+
+        quiz_messages = []
+        text_messages = []
+
+        async for msg in iter_channel_messages(
+            config.telegram, args.channel, max_messages=config.max_messages
+        ):
+            if msg.is_quiz:
+                quiz_messages.append(msg)
+            else:
+                text_messages.append(msg)
+
+        total = len(quiz_messages) + len(text_messages)
+        if total == 0:
+            console.print("[yellow]No messages found in channel.[/yellow]")
+            return
+
+        console.print(
+            f"Fetched [green]{total}[/green] messages "
+            f"([cyan]{len(quiz_messages)}[/cyan] quizzes, "
+            f"[cyan]{len(text_messages)}[/cyan] text).\n"
+        )
 
     # ── Phase 2: Classify ────────────────────────────────────────────────
     results: list[ClassifiedMessage] = []
@@ -125,24 +152,46 @@ async def run(args: argparse.Namespace) -> None:
 
     # Text messages go through the LLM
     if text_messages:
-        with Progress(
-            SpinnerColumn(),
-            TextColumn("[progress.description]{task.description}"),
-            BarColumn(),
-            MofNCompleteColumn(),
-            TimeElapsedColumn(),
-            console=console,
-        ) as progress:
-            task = progress.add_task("Classifying text messages…", total=len(text_messages))
+        try:
+            with Progress(
+                SpinnerColumn(),
+                TextColumn("[progress.description]{task.description}"),
+                BarColumn(),
+                MofNCompleteColumn(),
+                TimeElapsedColumn(),
+                console=console,
+            ) as progress:
+                task = progress.add_task(
+                    "Classifying text messages…", total=len(text_messages)
+                )
 
-            for i in range(0, len(text_messages), config.batch_size):
-                batch = text_messages[i : i + config.batch_size]
-                classified = await classifier.classify_batch(batch)
-                results.extend(classified)
-                progress.advance(task, advance=len(batch))
+                for i in range(0, len(text_messages), config.batch_size):
+                    batch = text_messages[i : i + config.batch_size]
+                    classified = await classifier.classify_batch(batch)
+                    results.extend(classified)
+                    progress.advance(task, advance=len(batch))
+        except Exception as exc:
+            console.print(
+                f"\n[bold red]Error during LLM classification:[/bold red] {exc}"
+            )
+            # Save all fetched messages so the next run can resume
+            all_raw = [m.to_dict() for m in quiz_messages + text_messages]
+            with open(pending_file, "w", encoding="utf-8") as f:
+                json.dump(all_raw, f, ensure_ascii=False, indent=2)
+            console.print(
+                f"[yellow]Saved [bold]{len(all_raw)}[/bold] messages to "
+                f"[bold]{pending_file}[/bold] for recovery.\n"
+                f"Run the same command again to retry classification.[/yellow]"
+            )
+            return
 
     # Sort by message_id to restore chronological order
     results.sort(key=lambda r: r.message_id)
+
+    # Clean up pending file if it exists (successful run)
+    if os.path.exists(pending_file):
+        os.remove(pending_file)
+        console.print("[dim]Cleaned up pending messages file.[/dim]")
 
     # ── Phase 3: Write output ────────────────────────────────────────────
     output_data = [r.to_dict() for r in results]
